@@ -7,7 +7,7 @@ import os from 'os';
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Minimum audio size threshold (in bytes) — silence wale chunks bahut chhote hote hain
-const MIN_AUDIO_SIZE_BYTES = 5000; // ~5KB se chhota chunk usually silence hai
+const MIN_AUDIO_SIZE_BYTES = 12000; // ~12KB se chhota chunk usually silence/noise hai
 
 export async function transcribeAudio(base64Audio) {
     let tempFilePath = "";
@@ -33,7 +33,8 @@ export async function transcribeAudio(base64Audio) {
             file: fs.createReadStream(tempFilePath),
             model: "whisper-large-v3-turbo",
             temperature: 0.0,
-            prompt: "Vaani Indian AI voice assistant.",
+            response_format: "verbose_json", // confidence scores + no_speech_prob milti hai
+            // prompt intentionally removed — Whisper prompt ko transcription mein echo kar deta hai
         });
 
         // Temp file delete
@@ -42,7 +43,26 @@ export async function transcribeAudio(base64Audio) {
         }
 
         const latency = Date.now() - startTime;
-        const text = (transcription.text || "").trim();
+
+        // verbose_json mein segments hote hain with confidence scores
+        const segments = transcription.segments || [];
+
+        // Low confidence ya silence segments filter karo
+        // avg_logprob < -0.5 = hallucination likely
+        // no_speech_prob > 0.6 = Whisper khud bol raha hai silence hai
+        const goodSegments = segments.filter(seg => {
+            const isLowConfidence = seg.avg_logprob < -0.5;
+            const isSilence = seg.no_speech_prob > 0.6;
+            if (isLowConfidence || isSilence) {
+                console.log(`🔇 Low-confidence segment dropped: "${seg.text.trim()}" (logprob: ${seg.avg_logprob?.toFixed(2)}, no_speech: ${seg.no_speech_prob?.toFixed(2)})`);
+                return false;
+            }
+            return true;
+        });
+
+        // ⚠️ NO fallback to transcription.text — agar sab segments filter ho gaye
+        // toh transcription.text mein wahi hallucinated text hoga, bypass nahi karna
+        const text = goodSegments.map(s => s.text).join(" ").trim();
 
         // Empty transcription check
         if (!text) {

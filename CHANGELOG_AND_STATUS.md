@@ -138,5 +138,108 @@ npm run dev
 # Running on http://localhost:3000
 ```
 
-### 3. Test:
 Browser mein `http://localhost:3000` kholein, mic button click karein aur naturally baat karein!
+
+---
+
+## 🔄 Session Changelog — 24 October 2026
+
+> **Session Focus:** ElevenLabs TTS integration, Hallucination filter upgrade, VAD improvement, Language-adaptive responses
+
+---
+
+### 5. 🔊 ElevenLabs Premium TTS Integration (`tts.js`, `server.js`, `page.jsx`)
+
+#### `vaani-backend/src/services/tts.js`
+- **Voice ID Badla:** Rachel (`21m00Tcm4TlvDq8ikWAM`) → **Jessica** (`cgSgspJ2msm6clMCkdW9`)
+  - Rachel = Library voice = Paid plan only → `402 Payment Required` error
+  - Jessica = Premade voice = **Free plan compatible** ✅
+- **Model Badla:** `eleven_multilingual_v2` (paid) → **`eleven_turbo_v2_5`** (free + Hinglish support)
+- **URL Fix:** `?optimize_streaming_latency=2` parameter hata diya (free plan pe supported nahi)
+- **Better Error Log:** Status code bhi log hota hai ab debug ke liye
+
+#### `vaani-backend/src/server.js`
+- **`agent_audio` event add kiya:** ElevenLabs ka base64 MP3 audio client ko bheja jaata hai
+- **`agent_audio_error` event add kiya:** Jab TTS fail ho, client ko batao taaki browser TTS fallback use ho — app band na ho
+
+#### `vaani-client/src/app/page.jsx`
+- **`agent_audio` handler:** Backend se aaya base64 MP3 seedha `new Audio()` se play hota hai
+- **`agent_audio_error` handler:** ElevenLabs fail hone par `speakAgentText()` (browser TTS fallback) call hota hai
+
+---
+
+### 6. 🎙️ STT Hallucination Filter — Major Upgrade (`stt.js`, `server.js`)
+
+#### `vaani-backend/src/services/stt.js`
+- **Min Audio Size Badha:** `5,000 bytes` → **`12,000 bytes`** — chhote noise chunks API tak pahunche nahi
+- **`verbose_json` format add kiya:** Whisper har segment ka `avg_logprob` aur `no_speech_prob` deta hai
+- **Prompt Echo Bug Fix (Critical):** Hindi prompt `"Sirf jo bola gaya hai..."` Whisper transcript mein wapas aa raha tha — prompt completely hata diya
+- **Segment-level Confidence Filter:**
+  - `avg_logprob < -0.5` → hallucination, segment drop
+  - `no_speech_prob > 0.6` → Whisper khud bolta hai silence hai, drop
+- **Fallback Bug Fix (Critical):** `|| transcription.text` fallback sab filtering undo kar raha tha — hata diya. Ab agar sab segments filter ho jayein toh `null` return hota hai
+
+#### `vaani-backend/src/server.js`
+- **Hallucination Patterns Expand Kiye:**
+  - Presentation phrases: `next slide`, `going to the next`, `click here`, `as you can see`
+  - Generic fillers: sirf `Hello.`, sirf `Thank you.`, sirf `Okay.`, sirf `Yes.`
+  - Whisper-specific bugs: `Hello Miriam`, `Hello Maria`, `[music]`, `[applause]`, `[laughter]`
+  - Filler sounds: `hmm`, `uh`, `um`
+
+---
+
+### 7. 🎤 VAD (Voice Activity Detection) Improvement (`page.jsx`)
+
+- **Threshold Raise Kiya:** `avg > 9` → **`avg > 20`**
+  - Pehle fan/AC/background noise bhi trigger kar raha tha
+  - Ab sirf clear human speech pe chunks bhejta hai
+- **Chunk Interval Badha:** `2500ms` → **`3000ms`** — longer slice = better Whisper context per chunk
+
+---
+
+### 8. 🤖 Language-Adaptive System Prompt (`llm.js`)
+
+- **Pehle:** Agent hamesha Hinglish mein bolta tha chahe user English mein bole
+- **Abhi:** User ki language automatically mirror karta hai
+  - User English bolega → English reply
+  - User Hindi/Hinglish bolega → Hinglish reply
+  - Mid-conversation switch → Agent bhi turant switch karta hai
+
+---
+
+### 9. 🔑 API Key Updates (`.env`)
+
+| Key | Status | Reason |
+|---|---|---|
+| `sk_eba1fa01...` (purani) | ❌ Expired | 401 Unauthorized |
+| `c98a6e3f5b6c...` (galat) | ❌ Wrong format | SHA hash tha, ElevenLabs key nahi |
+| `sk_82d09e50...` (nayi) | ✅ Active | Free plan, 10,000 chars/month |
+
+---
+
+### 🗓️ 24 Oct 2026 — Done Checklist Update
+
+- [x] ElevenLabs `agent_audio` + `agent_audio_error` events implement karna
+- [x] Browser TTS fallback jab ElevenLabs fail ho
+- [x] Jessica voice (free plan compatible) switch karna
+- [x] `eleven_turbo_v2_5` model switch karna
+- [x] Whisper prompt echo bug fix karna
+- [x] Segment-level confidence filter lagana
+- [x] VAD threshold `9` → `20` karna
+- [x] Language-adaptive LLM prompt banana
+- [x] ElevenLabs API key valid karna
+
+---
+
+### 🚀 Next Roadmap (Updated)
+
+| Priority | Feature | Detail |
+|---|---|---|
+| 🔴 High | **Auto VAD / Continuous Listening** | Button dabne ki zaroorat na ho, bolo toh auto start |
+| 🔴 High | **ElevenLabs Plan Upgrade** | Free plan = 10k chars/month sirf (~100-150 replies) |
+| 🟡 Medium | **Conversation History UI** | Poori chat scrollable list mein |
+| 🟡 Medium | **Interruption Support** | User agent ke bole mein baat kare toh agent ruke |
+| 🟡 Medium | **Better VAD Library** | `@ricky0123/vad-web` se accurate speech detection |
+| 🟢 Future | **Wake Word "Hey Vaani"** | Automatic activation without button |
+| 🟢 Future | **Tool Calling** | Calendar, reminder, Google search actions |
+

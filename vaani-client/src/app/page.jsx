@@ -28,7 +28,7 @@ export default function Home() {
         isSpeakingRef.current = isSpeaking;
     }, [isSpeaking]);
 
-    // 🔊 Agent Voice Synthesis
+    // 🔊 Agent Voice Synthesis (Browser TTS fallback — ElevenLabs ke bina)
     const speakAgentText = useCallback((text) => {
         if (typeof window === "undefined" || !('speechSynthesis' in window) || !text) return;
 
@@ -41,13 +41,17 @@ export default function Home() {
 
             const voices = window.speechSynthesis.getVoices();
 
-            // Indian English / Hindi voice priority for natural sounding Hinglish
+            // Google neural voices prefer karo — ye sabse smooth hoti hain
+            // Priority: Google Hindi > Google en-IN > Google UK Female > Google US English > any en-IN > any en
             const selectedVoice =
-                voices.find(v => v.lang === 'hi-IN' || v.lang === 'hi_IN') ||
+                voices.find(v => v.name === 'Google हिन्दी') ||
+                voices.find(v => v.name === 'Google Hindi') ||
+                voices.find(v => v.name.includes('Google') && (v.lang === 'hi-IN' || v.lang === 'hi_IN')) ||
+                voices.find(v => v.name.includes('Google') && (v.lang === 'en-IN' || v.lang === 'en_IN')) ||
+                voices.find(v => v.name === 'Google UK English Female') ||
+                voices.find(v => v.name === 'Google US English') ||
+                voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
                 voices.find(v => v.lang === 'en-IN' || v.lang === 'en_IN') ||
-                voices.find(v => v.name.toLowerCase().includes('hindi')) ||
-                voices.find(v => v.name.toLowerCase().includes('india')) ||
-                voices.find(v => v.name.toLowerCase().includes('google us english')) ||
                 voices.find(v => v.lang.startsWith('en')) ||
                 voices[0];
 
@@ -58,8 +62,10 @@ export default function Home() {
                 utterance.lang = 'en-IN';
             }
 
-            utterance.rate = 1.0;
-            utterance.pitch = 1.0;
+            // Slightly slower = clearer Hinglish pronunciation
+            utterance.rate = 0.95;
+            utterance.pitch = 1.05;
+            utterance.volume = 1.0;
 
             utterance.onstart = () => {
                 setIsSpeaking(true);
@@ -118,6 +124,16 @@ export default function Home() {
                     setIsThinking(false);
                     setAgentReply(event.text);
                     setLlmLatency(event.latencyMs);
+                    // Purana window.speechSynthesis hata diya hai, ab agent_audio event ka wait karenge
+                }
+                // 🔊 NAYA EVENT: Backend se aayi premium aawaz ko play karna
+                else if (event.type === "agent_audio") {
+                    const audio = new Audio(`data:audio/mp3;base64,${event.audio}`);
+                    audio.play().catch(e => console.error("Audio play error:", e));
+                }
+                // ⚠️ FALLBACK: ElevenLabs fail hone par browser TTS use karo
+                else if (event.type === "agent_audio_error") {
+                    console.warn("⚠️ ElevenLabs unavailable, using browser TTS as fallback");
                     speakAgentText(event.text);
                 }
             } catch (err) {
@@ -236,8 +252,9 @@ export default function Home() {
                     const avg = sum / dataArray.length;
                     setMicVolume(Math.min(100, Math.round((avg / 60) * 100)));
 
-                    // Threshold: ambient noise 0-6 hota hai, speech 10+
-                    if (avg > 9) {
+                    // Threshold: ambient noise 5-12 hota hai, clear speech 20+
+                    // 20 se kam = background noise / AC / fan ignore karo
+                    if (avg > 20) {
                         speechDetectedRef.current = true;
                     }
                 }, 80);
@@ -272,13 +289,13 @@ export default function Home() {
                 mediaRecorderRef.current = mediaRecorder;
                 setIsRecording(true);
 
-                // Har 2.5 second pe slice lo — stop & start for clean webm header
+                // Har 3 second pe slice lo — longer slice = better context for Whisper
                 intervalRef.current = setInterval(() => {
                     if (mediaRecorder.state === "recording") {
                         mediaRecorder.stop();
                         mediaRecorder.start();
                     }
-                }, 2500);
+                }, 3000);
 
             } catch (err) {
                 console.error("Mic error:", err);
