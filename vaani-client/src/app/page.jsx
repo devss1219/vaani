@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 
+
+
 export default function Home() {
     const [isConnected, setIsConnected] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
@@ -12,6 +14,8 @@ export default function Home() {
     const [latency, setLatency] = useState(null);
     const [llmLatency, setLlmLatency] = useState(null);
     const [micVolume, setMicVolume] = useState(0);
+    const [chatHistory, setChatHistory] = useState([]); // Naya chat history array
+    const chatEndRef = useRef(null); // Auto-scroll ke liye
 
     const wsRef = useRef(null);
     const mediaRecorderRef = useRef(null);
@@ -27,6 +31,10 @@ export default function Home() {
     useEffect(() => {
         isSpeakingRef.current = isSpeaking;
     }, [isSpeaking]);
+
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [chatHistory]);
 
     // 🔊 Agent Voice Synthesis (Browser TTS fallback — ElevenLabs ke bina)
     const speakAgentText = useCallback((text) => {
@@ -116,6 +124,9 @@ export default function Home() {
                 if (event.type === "stt_transcript") {
                     setTranscript(prev => (prev ? prev + " " + event.text : event.text));
                     setLatency(event.latencyMs);
+
+                    // 🟢 NAYA: Chat history mein user ka text add karo
+                    setChatHistory(prev => [...prev, { role: "user", text: event.text }]);
                 }
                 else if (event.type === "agent_thinking") {
                     setIsThinking(true);
@@ -124,7 +135,9 @@ export default function Home() {
                     setIsThinking(false);
                     setAgentReply(event.text);
                     setLlmLatency(event.latencyMs);
-                    // Purana window.speechSynthesis hata diya hai, ab agent_audio event ka wait karenge
+
+                    // 🟢 NAYA: Chat history mein agent ka reply add karo
+                    setChatHistory(prev => [...prev, { role: "agent", text: event.text }]);
                 }
                 // 🔊 NAYA EVENT: Backend se aayi premium aawaz ko play karna
                 else if (event.type === "agent_audio") {
@@ -146,7 +159,7 @@ export default function Home() {
             setIsConnected(false);
         };
 
-        ws.onerror = () => {};
+        ws.onerror = () => { };
 
         wsRef.current = ws;
 
@@ -184,7 +197,7 @@ export default function Home() {
         if (audioContextRef.current) {
             try {
                 audioContextRef.current.close();
-            } catch (e) {}
+            } catch (e) { }
             audioContextRef.current = null;
         }
         setIsRecording(false);
@@ -344,23 +357,21 @@ export default function Home() {
             {/* Central Voice Button & Wave */}
             <div className="relative flex flex-col items-center justify-center my-6">
                 {/* Glow ring */}
-                <div className={`absolute w-36 h-36 rounded-full blur-2xl transition-all duration-500 ${
-                    isSpeaking ? "bg-emerald-500/30 scale-125" :
+                <div className={`absolute w-36 h-36 rounded-full blur-2xl transition-all duration-500 ${isSpeaking ? "bg-emerald-500/30 scale-125" :
                     isRecording ? "bg-rose-500/30 scale-110" :
-                    "bg-indigo-500/20"
-                }`} />
+                        "bg-indigo-500/20"
+                    }`} />
 
                 <button
                     id="mic-toggle-btn"
                     onClick={toggleRecording}
                     disabled={!isConnected}
                     aria-label={isRecording ? "Stop Listening" : "Start Speaking"}
-                    className={`relative z-10 group flex items-center justify-center w-28 h-28 rounded-full transition-all duration-300 shadow-2xl ${
-                        !isConnected ? "bg-slate-800 cursor-not-allowed opacity-50" :
+                    className={`relative z-10 group flex items-center justify-center w-28 h-28 rounded-full transition-all duration-300 shadow-2xl ${!isConnected ? "bg-slate-800 cursor-not-allowed opacity-50" :
                         isSpeaking ? "bg-emerald-600 hover:bg-emerald-500 ring-4 ring-emerald-400/40 scale-105" :
-                        isRecording ? "bg-rose-600 hover:bg-rose-500 ring-4 ring-rose-400/40 scale-105" :
-                        "bg-indigo-600 hover:bg-indigo-500 hover:scale-105 ring-4 ring-indigo-500/30"
-                    }`}
+                            isRecording ? "bg-rose-600 hover:bg-rose-500 ring-4 ring-rose-400/40 scale-105" :
+                                "bg-indigo-600 hover:bg-indigo-500 hover:scale-105 ring-4 ring-indigo-500/30"
+                        }`}
                 >
                     {isRecording && !isSpeaking && (
                         <div className="absolute inset-0 rounded-full border-4 border-rose-400 animate-ping opacity-60"></div>
@@ -408,6 +419,31 @@ export default function Home() {
                         <span className="text-slate-400 text-sm">Click mic to start talking</span>
                     )}
                 </div>
+            </div>
+
+            {/* Chat History UI */}
+            <div className="w-full max-w-4xl mx-auto mt-8 bg-slate-900 border border-slate-700 rounded-2xl h-[500px] flex flex-col p-4 overflow-y-auto">
+
+                {chatHistory.length === 0 ? (
+                    <div className="flex items-center justify-center h-full text-slate-500">
+                        Mic on karo aur Vaani se baat karna shuru karo...
+                    </div>
+                ) : (
+                    <div className="space-y-4">
+                        {chatHistory.map((msg, index) => (
+                            <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[75%] p-4 rounded-2xl text-[16px] leading-relaxed ${msg.role === 'user'
+                                        ? 'bg-blue-600 text-white rounded-br-none' // User Blue Bubble
+                                        : 'bg-purple-900/80 border border-purple-500 text-purple-50 rounded-bl-none shadow-[0_0_15px_rgba(147,51,234,0.2)]' // Agent Glowing Bubble
+                                    }`}>
+                                    {msg.text}
+                                </div>
+                            </div>
+                        ))}
+                        {/* Auto-scroll anchor */}
+                        <div ref={chatEndRef} />
+                    </div>
+                )}
             </div>
 
             {/* Transcript & Response Cards */}
