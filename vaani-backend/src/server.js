@@ -3,7 +3,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { transcribeAudio } from './services/stt.js';
 import { generateResponse, clearHistory } from './services/llm.js';
-import { generateSpeech } from './services/tts.js'; // 👈 TTS import
+import { generateSpeech } from './services/tts.js';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -17,7 +17,7 @@ const server = app.listen(PORT, () => {
 const wss = new WebSocketServer({ server });
 
 // ═══════════════════════════════════════════════════════════════
-//  Hallucination Filter — Whisper silence pe ye generate karta hai
+//  Hallucination Filter (Upgraded)
 // ═══════════════════════════════════════════════════════════════
 const HALLUCINATION_PATTERNS = [
     // YouTube/media hallucinations
@@ -47,15 +47,18 @@ const HALLUCINATION_PATTERNS = [
     /\[music\]/i, /\[applause\]/i, /\[laughter\]/i,
 ];
 
-
 function isHallucination(text) {
     if (!text || text.trim().length < 2) return true;
     const trimmed = text.trim();
+
+    // Check against the upgraded pattern list
     for (const pattern of HALLUCINATION_PATTERNS) {
         if (pattern.test(trimmed)) return true;
     }
+
     const withoutPunctuation = trimmed.replace(/[.,!?।\s"':\-()]/g, "").trim();
     if (withoutPunctuation.length < 2) return true;
+
     const words = trimmed.split(/\s+/);
     if (words.length >= 4) {
         const uniqueWords = new Set(words.map(w => w.toLowerCase()));
@@ -118,6 +121,10 @@ wss.on('connection', (ws) => {
                         console.log(`🧠 Generating AI reply for: "${fullText}"`);
 
                         if (ws.readyState === ws.OPEN) {
+                            // 🟢 FIX: User ka poora sentence frontend ko bheja ja raha hai taaki Blue Bubble bane
+                            ws.send(JSON.stringify({ type: 'user_final_text', text: fullText }));
+
+                            // Phir Agent ki thinking state
                             ws.send(JSON.stringify({ type: 'agent_thinking' }));
                         }
 
@@ -142,7 +149,7 @@ wss.on('connection', (ws) => {
                                         audio: audioBase64
                                     }));
                                 } else if (ws.readyState === ws.OPEN) {
-                                    // TTS failed — client ko batao taaki browser fallback use kare
+                                    // TTS failed — fallback error bhejo
                                     ws.send(JSON.stringify({
                                         type: 'agent_audio_error',
                                         text: llmResult.text

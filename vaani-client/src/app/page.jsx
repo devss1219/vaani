@@ -2,8 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 
-
-
 export default function Home() {
     const [isConnected, setIsConnected] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
@@ -14,8 +12,8 @@ export default function Home() {
     const [latency, setLatency] = useState(null);
     const [llmLatency, setLlmLatency] = useState(null);
     const [micVolume, setMicVolume] = useState(0);
-    const [chatHistory, setChatHistory] = useState([]); // Naya chat history array
-    const chatEndRef = useRef(null); // Auto-scroll ke liye
+    const [chatHistory, setChatHistory] = useState([]);
+    const [alertMsg, setAlertMsg] = useState(null);
 
     const wsRef = useRef(null);
     const mediaRecorderRef = useRef(null);
@@ -25,18 +23,37 @@ export default function Home() {
     const volumeCheckIntervalRef = useRef(null);
     const speechDetectedRef = useRef(false);
     const isSpeakingRef = useRef(false);
+    const isRecordingRef = useRef(false);
+    const hasSpokenRef = useRef(false);
     const utteranceRef = useRef(null);
+    const chatEndRef = useRef(null);
+    const noSpeechTimeoutRef = useRef(null);
 
-    // Keep ref in sync with state for callbacks
+    // Keep refs in sync with state for callbacks
     useEffect(() => {
         isSpeakingRef.current = isSpeaking;
     }, [isSpeaking]);
 
     useEffect(() => {
-        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [chatHistory]);
+        isRecordingRef.current = isRecording;
+    }, [isRecording]);
 
-    // 🔊 Agent Voice Synthesis (Browser TTS fallback — ElevenLabs ke bina)
+    // Auto-scroll to bottom of chat
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [chatHistory, isThinking]);
+
+    // Auto-dismiss alert after 8 seconds
+    useEffect(() => {
+        if (alertMsg) {
+            const timer = setTimeout(() => {
+                setAlertMsg(null);
+            }, 8000);
+            return () => clearTimeout(timer);
+        }
+    }, [alertMsg]);
+
+    // 🔊 Agent Voice Synthesis (Browser TTS fallback)
     const speakAgentText = useCallback((text) => {
         if (typeof window === "undefined" || !('speechSynthesis' in window) || !text) return;
 
@@ -48,9 +65,6 @@ export default function Home() {
             utteranceRef.current = utterance;
 
             const voices = window.speechSynthesis.getVoices();
-
-            // Google neural voices prefer karo — ye sabse smooth hoti hain
-            // Priority: Google Hindi > Google en-IN > Google UK Female > Google US English > any en-IN > any en
             const selectedVoice =
                 voices.find(v => v.name === 'Google हिन्दी') ||
                 voices.find(v => v.name === 'Google Hindi') ||
@@ -70,7 +84,6 @@ export default function Home() {
                 utterance.lang = 'en-IN';
             }
 
-            // Slightly slower = clearer Hinglish pronunciation
             utterance.rate = 0.95;
             utterance.pitch = 1.05;
             utterance.volume = 1.0;
@@ -124,8 +137,8 @@ export default function Home() {
                 if (event.type === "stt_transcript") {
                     setTranscript(prev => (prev ? prev + " " + event.text : event.text));
                     setLatency(event.latencyMs);
-
-                    // 🟢 NAYA: Chat history mein user ka text add karo
+                }
+                else if (event.type === "user_final_text") {
                     setChatHistory(prev => [...prev, { role: "user", text: event.text }]);
                 }
                 else if (event.type === "agent_thinking") {
@@ -135,19 +148,26 @@ export default function Home() {
                     setIsThinking(false);
                     setAgentReply(event.text);
                     setLlmLatency(event.latencyMs);
-
-                    // 🟢 NAYA: Chat history mein agent ka reply add karo
                     setChatHistory(prev => [...prev, { role: "agent", text: event.text }]);
                 }
-                // 🔊 NAYA EVENT: Backend se aayi premium aawaz ko play karna
                 else if (event.type === "agent_audio") {
+                    setIsSpeaking(true);
                     const audio = new Audio(`data:audio/mp3;base64,${event.audio}`);
-                    audio.play().catch(e => console.error("Audio play error:", e));
+
+                    audio.onended = () => {
+                        setIsSpeaking(false);
+                    };
+
+                    audio.play().catch(e => {
+                        console.error("Audio play error:", e);
+                        setIsSpeaking(false);
+                    });
                 }
-                // ⚠️ FALLBACK: ElevenLabs fail hone par browser TTS use karo
                 else if (event.type === "agent_audio_error") {
                     console.warn("⚠️ ElevenLabs unavailable, using browser TTS as fallback");
-                    speakAgentText(event.text);
+                    if (event.text) {
+                        speakAgentText(event.text);
+                    }
                 }
             } catch (err) {
                 console.error("Failed to parse WS message", err);
@@ -167,6 +187,7 @@ export default function Home() {
             ws.close();
             if (intervalRef.current) clearInterval(intervalRef.current);
             if (volumeCheckIntervalRef.current) clearInterval(volumeCheckIntervalRef.current);
+            if (noSpeechTimeoutRef.current) clearTimeout(noSpeechTimeoutRef.current);
             if (typeof window !== "undefined" && 'speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
             }
@@ -174,9 +195,158 @@ export default function Home() {
     }, [speakAgentText]);
 
     // ═══════════════════════════════════════════════════════════
-    //  Stop Recording Helper
+    //  Mic Recording & Permissions Logic
     // ═══════════════════════════════════════════════════════════
+    const startRecording = async () => {
+        setAlertMsg(null);
+        hasSpokenRef.current = false;
+        if (noSpeechTimeoutRef.current) {
+            clearTimeout(noSpeechTimeoutRef.current);
+            noSpeechTimeoutRef.current = null;
+        }
+
+        // Audio Context unlock on click
+        if (typeof window !== "undefined" && 'speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            const unlock = new SpeechSynthesisUtterance('');
+            unlock.volume = 0;
+            window.speechSynthesis.speak(unlock);
+        }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                }
+            });
+
+            const audioTrack = stream.getAudioTracks()[0];
+            if (audioTrack) {
+                if (audioTrack.muted) {
+                    setAlertMsg("Mic muted hai! Kripya apna mic check karein.");
+                }
+                audioTrack.onmute = () => {
+                    setAlertMsg("Mic muted hai! Kripya apna mic check karein.");
+                };
+                audioTrack.onunmute = () => {
+                    setAlertMsg(null);
+                };
+            }
+
+            setIsRecording(true);
+            isRecordingRef.current = true;
+            speechDetectedRef.current = false;
+            hasSpokenRef.current = false;
+
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContextClass();
+            const source = audioCtx.createMediaStreamSource(stream);
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+
+            audioContextRef.current = audioCtx;
+            analyserRef.current = analyser;
+
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            volumeCheckIntervalRef.current = setInterval(() => {
+                if (isSpeakingRef.current) {
+                    setMicVolume(0);
+                    return;
+                }
+
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                }
+                const avg = sum / dataArray.length;
+                setMicVolume(Math.min(100, Math.round((avg / 25) * 100)));
+
+                // Sensitive threshold: agar thodi si bhi aawaz aayi toh speech confirm
+                if (avg > 3) {
+                    speechDetectedRef.current = true;
+                    hasSpokenRef.current = true;
+                    // Jaise hi aawaz detect ho, silence alert clear karo
+                    setAlertMsg(prev => (prev?.includes("aawaz nahi aa rahi") ? null : prev));
+                }
+            }, 80);
+
+            const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (
+                    e.data.size > 0 &&
+                    wsRef.current?.readyState === WebSocket.OPEN &&
+                    !isSpeakingRef.current
+                ) {
+                    // Send if speech detected or chunk has substantial audio data
+                    if (speechDetectedRef.current || e.data.size > 10000) {
+                        const reader = new FileReader();
+                        reader.readAsDataURL(e.data);
+                        reader.onloadend = () => {
+                            const base64String = reader.result.split(",")[1];
+                            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                                wsRef.current.send(JSON.stringify({
+                                    type: "audio_chunk",
+                                    data: base64String
+                                }));
+                            }
+                        };
+                    } else {
+                        console.log("🔇 Silence skipped, chunk dropped");
+                    }
+                }
+                speechDetectedRef.current = false;
+            };
+
+            mediaRecorder.start();
+            mediaRecorderRef.current = mediaRecorder;
+
+            // 3 second interval slice taaki har chunk complete WebM header ke sath ho
+            intervalRef.current = setInterval(() => {
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+                    mediaRecorderRef.current.stop();
+                    mediaRecorderRef.current.start();
+                }
+            }, 3000);
+
+            // 🛑 4 second tak koi aawaz nahi aayi (mic off/muted/silent), toh alert show karo!
+            noSpeechTimeoutRef.current = setTimeout(() => {
+                if (isRecordingRef.current && !hasSpokenRef.current) {
+                    setAlertMsg("Mic on hai par aawaz nahi aa rahi. Kripya apna mic check karein!");
+                }
+            }, 4000);
+
+        } catch (err) {
+            console.error("Mic Access Error:", err);
+            setIsRecording(false);
+            isRecordingRef.current = false;
+            if (err.name === 'NotAllowedError') {
+                setAlertMsg("Mic ki permission denied hai! Kripya browser settings mein jaakar mic allow karein.");
+            } else if (err.name === 'NotFoundError') {
+                setAlertMsg("Koi microphone nahi mila! Kripya apna device check karein.");
+            } else {
+                setAlertMsg("Mic access karne mein problem aayi: " + err.message);
+            }
+        }
+    };
+
     const stopRecording = () => {
+        setIsRecording(false);
+        isRecordingRef.current = false;
+        hasSpokenRef.current = false;
+        speechDetectedRef.current = false;
+        setMicVolume(0);
+        setAlertMsg(null); // Mic off hote hi alert clear karo
+
+        if (noSpeechTimeoutRef.current) {
+            clearTimeout(noSpeechTimeoutRef.current);
+            noSpeechTimeoutRef.current = null;
+        }
         if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
@@ -200,121 +370,13 @@ export default function Home() {
             } catch (e) { }
             audioContextRef.current = null;
         }
-        setIsRecording(false);
-        setMicVolume(0);
-        speechDetectedRef.current = false;
     };
 
-    // ═══════════════════════════════════════════════════════════
-    //  Recording Toggle with Silence & Echo Prevention
-    // ═══════════════════════════════════════════════════════════
-    const toggleRecording = async () => {
+    const toggleRecording = () => {
         if (isRecording) {
             stopRecording();
         } else {
-            try {
-                setTranscript("");
-                setAgentReply("");
-                setIsThinking(false);
-                setLatency(null);
-                setLlmLatency(null);
-
-                // Unlock audio context on click
-                if (typeof window !== "undefined" && 'speechSynthesis' in window) {
-                    window.speechSynthesis.cancel();
-                    const unlock = new SpeechSynthesisUtterance('');
-                    unlock.volume = 0;
-                    window.speechSynthesis.speak(unlock);
-                }
-
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                    }
-                });
-
-                // Setup Web Audio API volume monitoring (VAD)
-                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                const audioCtx = new AudioContextClass();
-                const source = audioCtx.createMediaStreamSource(stream);
-                const analyser = audioCtx.createAnalyser();
-                analyser.fftSize = 256;
-                source.connect(analyser);
-
-                audioContextRef.current = audioCtx;
-                analyserRef.current = analyser;
-                speechDetectedRef.current = false;
-
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-                // Monitor volume continuously (every 80ms)
-                volumeCheckIntervalRef.current = setInterval(() => {
-                    // Agar Vaani bol rahi hai toh mic input ko echo manke ignore karo
-                    if (isSpeakingRef.current) {
-                        setMicVolume(0);
-                        return;
-                    }
-
-                    analyser.getByteFrequencyData(dataArray);
-                    let sum = 0;
-                    for (let i = 0; i < dataArray.length; i++) {
-                        sum += dataArray[i];
-                    }
-                    const avg = sum / dataArray.length;
-                    setMicVolume(Math.min(100, Math.round((avg / 60) * 100)));
-
-                    // Threshold: ambient noise 5-12 hota hai, clear speech 20+
-                    // 20 se kam = background noise / AC / fan ignore karo
-                    if (avg > 20) {
-                        speechDetectedRef.current = true;
-                    }
-                }, 80);
-
-                const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-                mediaRecorder.ondataavailable = (event) => {
-                    // Sirf tab bhejo agar agent nahi bol raha hai aur speech detect hui hai
-                    if (
-                        event.data.size > 0 &&
-                        wsRef.current?.readyState === WebSocket.OPEN &&
-                        !isSpeakingRef.current &&
-                        speechDetectedRef.current
-                    ) {
-                        const reader = new FileReader();
-                        reader.readAsDataURL(event.data);
-                        reader.onloadend = () => {
-                            const base64String = reader.result.split(",")[1];
-                            wsRef.current.send(JSON.stringify({
-                                type: "audio_chunk",
-                                data: base64String
-                            }));
-                        };
-                    } else if (!speechDetectedRef.current) {
-                        console.log("🔇 Silence skipped, chunk dropped");
-                    }
-                    // Reset speech flag for next slice
-                    speechDetectedRef.current = false;
-                };
-
-                mediaRecorder.start();
-                mediaRecorderRef.current = mediaRecorder;
-                setIsRecording(true);
-
-                // Har 3 second pe slice lo — longer slice = better context for Whisper
-                intervalRef.current = setInterval(() => {
-                    if (mediaRecorder.state === "recording") {
-                        mediaRecorder.stop();
-                        mediaRecorder.start();
-                    }
-                }, 3000);
-
-            } catch (err) {
-                console.error("Mic error:", err);
-                alert("Please allow microphone access!");
-                stopRecording();
-            }
+            startRecording();
         }
     };
 
@@ -325,6 +387,8 @@ export default function Home() {
         setIsThinking(false);
         setLatency(null);
         setLlmLatency(null);
+        setChatHistory([]);
+        setAlertMsg(null);
         if (typeof window !== "undefined" && 'speechSynthesis' in window) {
             window.speechSynthesis.cancel();
         }
@@ -335,31 +399,110 @@ export default function Home() {
     };
 
     return (
-        <main className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-slate-100 selection:bg-indigo-500 selection:text-white">
-            {/* Header */}
-            <div className="text-center mb-8">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/80 border border-slate-800 text-xs font-medium text-slate-400 mb-4">
-                    <span className="relative flex h-2 w-2">
+        <main className="min-h-screen bg-[#f8fbff] flex flex-col items-center justify-center p-4 md:p-6 text-slate-800 selection:bg-blue-500 selection:text-white font-sans relative">
+
+            {/* 🚨 Alert Box for Errors (Fixed Top Toast Notification) */}
+            {alertMsg && (
+                <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 max-w-md w-[92%] bg-rose-50/95 backdrop-blur border border-rose-200 text-rose-600 px-4 py-3 rounded-2xl flex items-start space-x-3 shadow-xl animate-fade-in-up">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 mt-0.5 shrink-0">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <div className="flex-1 text-sm font-medium">
+                        {alertMsg}
+                    </div>
+                    <button onClick={() => setAlertMsg(null)} className="text-rose-400 hover:text-rose-600">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+            )}
+
+            {/* ✨ Premium Header */}
+            <div className="text-center mb-6">
+                <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white border border-blue-100 shadow-sm text-xs font-semibold text-slate-500 mb-5">
+                    <span className="relative flex h-2.5 w-2.5">
                         <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isConnected ? 'bg-emerald-400' : 'bg-rose-400'}`}></span>
-                        <span className={`relative inline-flex rounded-full h-2 w-2 ${isConnected ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
+                        <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isConnected ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
                     </span>
                     {isConnected ? "Gateway Connected" : "Connecting..."}
                 </div>
 
-                <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent mb-3">
+                <h1 className="text-4xl md:text-5xl font-black tracking-tight bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent mb-3 drop-shadow-sm">
                     Vaani Voice Agent
                 </h1>
-                <p className="text-slate-400 text-base md:text-lg max-w-md mx-auto">
+                <p className="text-slate-500 text-sm md:text-base max-w-md mx-auto font-medium">
                     Natural Hindi & English Voice Assistant with instant low-latency responses.
                 </p>
             </div>
 
-            {/* Central Voice Button & Wave */}
-            <div className="relative flex flex-col items-center justify-center my-6">
-                {/* Glow ring */}
-                <div className={`absolute w-36 h-36 rounded-full blur-2xl transition-all duration-500 ${isSpeaking ? "bg-emerald-500/30 scale-125" :
-                    isRecording ? "bg-rose-500/30 scale-110" :
-                        "bg-indigo-500/20"
+            {/* 🌊 Premium White-Blue Chat UI */}
+            <div className="w-full max-w-4xl mx-auto bg-white border border-blue-50 rounded-[2rem] h-[480px] flex flex-col p-6 overflow-y-auto shadow-[0_20px_60px_-15px_rgba(37,99,235,0.1)]">
+                {chatHistory.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full text-blue-300 space-y-4">
+                        <svg className="w-16 h-16 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                        <p className="font-medium text-lg">Mic on karo aur Vaani se baat karna shuru karo...</p>
+                    </div>
+                ) : (
+                    <div className="space-y-6">
+                        {chatHistory.map((msg, index) => (
+                            <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+
+                                {/* 🎙️ Agent Avatar & Speaking Wave */}
+                                {msg.role === 'agent' && (
+                                    <div className="flex items-end mr-3 mb-1">
+                                        {isSpeaking && index === chatHistory.length - 1 ? (
+                                            <div className="flex items-end space-x-1 h-6 w-8 pb-2">
+                                                <div className="w-[4px] bg-blue-600 rounded-full wave-bar"></div>
+                                                <div className="w-[4px] bg-blue-500 rounded-full wave-bar"></div>
+                                                <div className="w-[4px] bg-blue-400 rounded-full wave-bar"></div>
+                                                <div className="w-[4px] bg-blue-300 rounded-full wave-bar"></div>
+                                            </div>
+                                        ) : (
+                                            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-500 shadow-md flex items-center justify-center text-white font-bold text-xs">
+                                                V
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* 💬 Chat Bubbles */}
+                                <div className={`max-w-[75%] p-4 rounded-3xl text-[15px] md:text-[16px] leading-relaxed shadow-sm ${msg.role === 'user'
+                                    ? 'bg-blue-600 text-white rounded-br-sm shadow-blue-600/20'
+                                    : 'bg-[#f4f7ff] border border-blue-100/50 text-slate-700 rounded-bl-sm shadow-sm'
+                                    }`}>
+                                    {msg.text}
+                                </div>
+                            </div>
+                        ))}
+
+                        {/* ⏳ Thinking Indicator */}
+                        {isThinking && (
+                            <div className="flex justify-start">
+                                <div className="flex items-end mr-3 mb-1">
+                                    <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+                                        <span className="animate-pulse text-blue-500 text-xl font-bold">...</span>
+                                    </div>
+                                </div>
+                                <div className="max-w-[75%] px-6 py-3 rounded-3xl bg-[#f4f7ff] border border-blue-50 text-blue-400 text-sm italic rounded-bl-sm flex items-center space-x-2">
+                                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+                                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                                </div>
+                            </div>
+                        )}
+                        <div ref={chatEndRef} />
+                    </div>
+                )}
+            </div>
+
+            {/* 🎙️ Central Voice Button & Visualizer */}
+            <div className="relative flex flex-col items-center justify-center mt-8 mb-4">
+                {/* Clean Glow Effect for Light Theme */}
+                <div className={`absolute w-36 h-36 rounded-full blur-3xl transition-all duration-500 ${isSpeaking ? "bg-emerald-400/20 scale-125" :
+                    isRecording ? "bg-rose-400/20 scale-110" : "bg-blue-400/10"
                     }`} />
 
                 <button
@@ -367,18 +510,18 @@ export default function Home() {
                     onClick={toggleRecording}
                     disabled={!isConnected}
                     aria-label={isRecording ? "Stop Listening" : "Start Speaking"}
-                    className={`relative z-10 group flex items-center justify-center w-28 h-28 rounded-full transition-all duration-300 shadow-2xl ${!isConnected ? "bg-slate-800 cursor-not-allowed opacity-50" :
-                        isSpeaking ? "bg-emerald-600 hover:bg-emerald-500 ring-4 ring-emerald-400/40 scale-105" :
-                            isRecording ? "bg-rose-600 hover:bg-rose-500 ring-4 ring-rose-400/40 scale-105" :
-                                "bg-indigo-600 hover:bg-indigo-500 hover:scale-105 ring-4 ring-indigo-500/30"
+                    className={`relative z-10 group flex items-center justify-center w-24 h-24 rounded-full transition-all duration-300 shadow-[0_10px_40px_-10px_rgba(0,0,0,0.2)] ${!isConnected ? "bg-slate-200 cursor-not-allowed text-slate-400" :
+                        isSpeaking ? "bg-emerald-500 hover:bg-emerald-600 ring-4 ring-emerald-100 scale-105" :
+                            isRecording ? "bg-rose-500 hover:bg-rose-600 ring-4 ring-rose-100 scale-105" :
+                                "bg-blue-600 hover:bg-blue-700 hover:scale-105 ring-4 ring-blue-50"
                         }`}
                 >
                     {isRecording && !isSpeaking && (
-                        <div className="absolute inset-0 rounded-full border-4 border-rose-400 animate-ping opacity-60"></div>
+                        <div className="absolute inset-0 rounded-full border-4 border-rose-300 animate-ping opacity-50"></div>
                     )}
 
                     {isRecording ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-10 h-10 text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-10 h-10 text-white">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z" />
                         </svg>
                     ) : (
@@ -391,144 +534,33 @@ export default function Home() {
                 {/* State Tag */}
                 <div className="mt-5 text-center min-h-[32px] flex items-center justify-center">
                     {isSpeaking ? (
-                        <div className="flex items-center space-x-2 text-emerald-400 font-medium text-sm animate-pulse">
-                            <span className="flex space-x-1 items-end h-4">
-                                <span className="w-1 bg-emerald-400 h-2 animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                                <span className="w-1 bg-emerald-400 h-4 animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                                <span className="w-1 bg-emerald-400 h-3 animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                            </span>
+                        <div className="flex items-center space-x-2 text-emerald-600 font-semibold text-sm">
                             <span>Vaani is speaking...</span>
                         </div>
                     ) : isThinking ? (
-                        <div className="flex items-center space-x-2 text-amber-300 font-medium text-sm animate-pulse">
-                            <div className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></div>
+                        <div className="flex items-center space-x-2 text-blue-500 font-semibold text-sm animate-pulse">
                             <span>Vaani is thinking...</span>
                         </div>
                     ) : isRecording ? (
-                        <div className="flex flex-col items-center space-y-1">
-                            <span className="text-rose-400 text-sm font-medium">Listening... speak naturally</span>
-                            {/* Live volume level meter */}
-                            <div className="w-32 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                                <div
-                                    className="h-full bg-gradient-to-r from-emerald-500 to-rose-500 transition-all duration-75"
-                                    style={{ width: `${micVolume}%` }}
-                                />
+                        <div className="flex flex-col items-center space-y-2">
+                            <span className="text-rose-500 text-sm font-semibold">Listening... speak naturally</span>
+                            <div className="w-32 h-1.5 bg-rose-100 rounded-full overflow-hidden">
+                                <div className="h-full bg-rose-500 transition-all duration-75" style={{ width: `${micVolume}%` }} />
                             </div>
                         </div>
                     ) : (
-                        <span className="text-slate-400 text-sm">Click mic to start talking</span>
+                        <span className="text-slate-500 font-medium text-sm">Click mic to start talking</span>
                     )}
                 </div>
             </div>
 
-            {/* Chat History UI */}
-            <div className="w-full max-w-4xl mx-auto mt-8 bg-slate-900 border border-slate-700 rounded-2xl h-[500px] flex flex-col p-4 overflow-y-auto">
-
-                {chatHistory.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-slate-500">
-                        Mic on karo aur Vaani se baat karna shuru karo...
-                    </div>
-                ) : (
-                    <div className="space-y-4">
-                        {chatHistory.map((msg, index) => (
-                            <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[75%] p-4 rounded-2xl text-[16px] leading-relaxed ${msg.role === 'user'
-                                        ? 'bg-blue-600 text-white rounded-br-none' // User Blue Bubble
-                                        : 'bg-purple-900/80 border border-purple-500 text-purple-50 rounded-bl-none shadow-[0_0_15px_rgba(147,51,234,0.2)]' // Agent Glowing Bubble
-                                    }`}>
-                                    {msg.text}
-                                </div>
-                            </div>
-                        ))}
-                        {/* Auto-scroll anchor */}
-                        <div ref={chatEndRef} />
-                    </div>
-                )}
-            </div>
-
-            {/* Transcript & Response Cards */}
-            <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-                {/* User Card */}
-                <div className="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur flex flex-col justify-between min-h-[200px] relative transition-all duration-300 hover:border-slate-700">
-                    <div>
-                        <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                                You Said (Live Transcript)
-                            </span>
-                        </div>
-                        {transcript ? (
-                            <p className="text-lg leading-relaxed text-slate-100 font-normal">
-                                {transcript}
-                            </p>
-                        ) : (
-                            <div className="h-28 flex items-center justify-center text-slate-500 text-sm italic">
-                                {isRecording ? "Listening to your voice..." : "Click mic and speak in Hindi or English..."}
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-xs font-mono text-slate-400">
-                        <span>Speed</span>
-                        {latency !== null ? (
-                            <span className="text-indigo-400 font-semibold">STT: {latency}ms</span>
-                        ) : (
-                            <span className="text-slate-600">—</span>
-                        )}
-                    </div>
-                </div>
-
-                {/* Agent Card */}
-                <div className="bg-gradient-to-br from-slate-900/90 to-indigo-950/30 border border-indigo-500/20 rounded-2xl p-6 shadow-xl backdrop-blur flex flex-col justify-between min-h-[200px] relative transition-all duration-300 hover:border-indigo-500/40">
-                    <div>
-                        <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                                Agent Vaani
-                            </span>
-                            {agentReply && (
-                                <button
-                                    onClick={() => speakAgentText(agentReply)}
-                                    title="Replay Voice"
-                                    className="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
-                                >
-                                    🔊 Replay
-                                </button>
-                            )}
-                        </div>
-                        {agentReply ? (
-                            <p className="text-lg leading-relaxed text-emerald-200 font-medium">
-                                {agentReply}
-                            </p>
-                        ) : isThinking ? (
-                            <div className="h-28 flex items-center justify-center text-amber-300 text-sm font-medium animate-pulse">
-                                Vaani is drafting a reply...
-                            </div>
-                        ) : (
-                            <div className="h-28 flex items-center justify-center text-slate-500 text-sm italic">
-                                Vaani will reply here...
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-xs font-mono text-slate-400">
-                        <span>AI Latency</span>
-                        {llmLatency !== null && llmLatency > 0 ? (
-                            <span className="text-emerald-400 font-semibold">LLM: {llmLatency}ms</span>
-                        ) : (
-                            <span className="text-slate-600">—</span>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-            {/* Action Bar */}
-            <div className="mt-8 flex items-center gap-4 text-xs text-slate-400">
+            {/* 🔄 Action Bar */}
+            <div className="mt-2">
                 <button
                     onClick={handleReset}
-                    className="px-4 py-2 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 hover:text-slate-200 transition-colors flex items-center gap-1.5 shadow-sm"
+                    className="px-5 py-2.5 rounded-xl bg-white border border-slate-200 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600 text-slate-600 font-medium text-sm transition-all flex items-center gap-2 shadow-sm"
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-3.5 h-3.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
                     </svg>
                     New Conversation
