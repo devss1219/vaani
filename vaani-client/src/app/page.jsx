@@ -126,7 +126,7 @@ export default function Home() {
             window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
         }
 
-        const ws = new WebSocket("ws://localhost:8080");
+        const ws = new WebSocket("wss://vaani-v7q6.onrender.com");
 
         ws.onopen = () => {
             console.log("✅ Connected to Voice Gateway");
@@ -488,7 +488,7 @@ export default function Home() {
 
                         <div
                             className={`absolute rounded-full transition-all ease-out z-0 ${isRecording ? "bg-gradient-to-r from-cyan-400 to-blue-500 opacity-30 blur-2xl" :
-                                    isSpeaking ? "bg-gradient-to-r from-violet-500 to-fuchsia-500 opacity-30 blur-2xl" : "bg-cyan-200 opacity-20 blur-2xl"
+                                isSpeaking ? "bg-gradient-to-r from-violet-500 to-fuchsia-500 opacity-30 blur-2xl" : "bg-cyan-200 opacity-20 blur-2xl"
                                 }`}
                             style={{
                                 width: '220px', height: '220px',
@@ -502,7 +502,7 @@ export default function Home() {
                                 <div className="w-[120px] h-[120px] rounded-full bg-[#141518] border border-[#2a2d35] flex items-center justify-center relative shadow-[0_10px_20px_rgba(0,0,0,0.5)]">
 
                                     <div className={`absolute inset-1 rounded-full border border-white/10 transition-all ${isRecording ? 'bg-cyan-500/20 shadow-[0_0_30px_#06b6d4]' :
-                                            isSpeaking ? 'bg-violet-500/20 shadow-[0_0_30px_#8b5cf6]' : ''
+                                        isSpeaking ? 'bg-violet-500/20 shadow-[0_0_30px_#8b5cf6]' : ''
                                         }`}
                                         style={{
                                             transform: `scale(${1 + (isRecording ? (micVolume / 100) * 0.5 : 0)})`
@@ -575,8 +575,8 @@ export default function Home() {
                             chatHistory.map((msg, index) => (
                                 <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     <div className={`max-w-[85%] px-4 py-2.5 text-[12px] leading-relaxed font-semibold shadow-[4px_4px_10px_#c3c9d1,-4px_-4px_10px_#ffffff] transition-all ${msg.role === 'user'
-                                            ? 'bg-[#ebf0f5] text-slate-700 rounded-2xl rounded-br-sm'
-                                            : 'bg-[#1a1c23] text-white rounded-2xl rounded-bl-sm'
+                                        ? 'bg-[#ebf0f5] text-slate-700 rounded-2xl rounded-br-sm'
+                                        : 'bg-[#1a1c23] text-white rounded-2xl rounded-bl-sm'
                                         }`}>
                                         {msg.text}
                                     </div>
